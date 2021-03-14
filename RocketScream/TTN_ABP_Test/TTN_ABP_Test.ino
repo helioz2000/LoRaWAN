@@ -165,6 +165,28 @@ void printHex2(unsigned v) {
     Serial.print(v, HEX);
 }
 
+void showRxtxFlags(void) {
+  Serial.print(F("LMIC.rxtxFlags: "));
+  Serial.print(LMIC.txrxFlags);
+  if (LMIC.txrxFlags & TXRX_ACK)
+    Serial.print(F(" TXRX_ACK"));
+  if (LMIC.txrxFlags & TXRX_NACK)
+    Serial.print(F(" TXRX_NACK"));
+  if (LMIC.txrxFlags & TXRX_PORT)
+    Serial.print(F(" TXRX_PORT"));
+  if (LMIC.txrxFlags & TXRX_NOPORT)
+    Serial.print(F(" TXRX_NOPORT"));
+  if (LMIC.txrxFlags & TXRX_DNW1)
+    Serial.print(F(" TXRX_DNW1"));
+  if (LMIC.txrxFlags & TXRX_DNW2)
+    Serial.print(F(" TXRX_DNW2"));
+  if (LMIC.txrxFlags & TXRX_PING)
+    Serial.print(F(" TXRX_PING"));
+  if (LMIC.txrxFlags & TXRX_LENERR)
+    Serial.print(F(" TXRX_LENERR"));
+  Serial.println();
+}
+
 // This function will only work for Mini Ultra Pro V2 or greater
 void setDevEui(unsigned char* buf)
 {
@@ -241,17 +263,22 @@ void user_request_network_time_callback(void *pVoidUserUTCTime, int flagSuccess)
 
 
 void do_send(osjob_t* j){
+    lmic_tx_error_t lmic_tx_error;
     // Check if there is not a current TX/RX job running
     if (LMIC.opmode & OP_TXRXPEND) {
         Serial.println(F("OP_TXRXPEND, not sending"));
     } else {
         // Schedule a network time request at the next possible time
         //if (!timeSyncDone) {
-          LMIC_requestNetworkTime(user_request_network_time_callback, &userUTCTime);
+        //  LMIC_requestNetworkTime(user_request_network_time_callback, &userUTCTime);
         //}
         // Prepare upstream data transmission at the next possible time.
-        LMIC_setTxData2(1, mydata, sizeof(mydata)-1, 0);
+        lmic_tx_error = LMIC_setTxData2(1, mydata, sizeof(mydata)-1, 0);
         Serial.println(F("Packet queued"));
+        if (lmic_tx_error != LMIC_ERROR_SUCCESS) {
+          Serial.print(F("LMIC TX error: "));
+          Serial.println(lmic_tx_error);
+        }
     }
 }
 
@@ -272,13 +299,14 @@ void onEvent (ev_t ev) {
             Serial.println(F("EV_BEACON_TRACKED"));
             break;
         case EV_JOINING:
-
             Serial.println(F("EV_JOINING"));
+            if (LMIC.txrxFlags) showRxtxFlags();
             break;
         case EV_JOINED:
             joined=true;
             txActive=false;
             Serial.println(F("EV_JOINED"));
+            if (LMIC.txrxFlags) showRxtxFlags();
             {
               u4_t netid = 0;
               devaddr_t devaddr = 0;
@@ -319,15 +347,18 @@ void onEvent (ev_t ev) {
         */
         case EV_JOIN_FAILED:
             Serial.println(F("EV_JOIN_FAILED"));
+            if (LMIC.txrxFlags) showRxtxFlags();
             break;
         case EV_REJOIN_FAILED:
             Serial.println(F("EV_REJOIN_FAILED"));
+            if (LMIC.txrxFlags) showRxtxFlags();
             break;
         case EV_TXCOMPLETE:
             txActive = false;
-            Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
-            if (LMIC.txrxFlags & TXRX_ACK)
-              Serial.println(F("Received ack"));
+            Serial.print(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
+            Serial.print(F(" LMIC.txCnt: "));
+            Serial.println(LMIC.txCnt);
+            showRxtxFlags();
             if (LMIC.dataLen) {
               Serial.print(F("Received "));
               Serial.print(LMIC.dataLen);
@@ -345,6 +376,7 @@ void onEvent (ev_t ev) {
         case EV_RXCOMPLETE:
             // data received in ping slot
             Serial.println(F("EV_RXCOMPLETE"));
+            if (LMIC.txrxFlags) showRxtxFlags();
             break;
         case EV_LINK_DEAD:
             Serial.println(F("EV_LINK_DEAD"));
@@ -361,8 +393,9 @@ void onEvent (ev_t ev) {
         ||    break;
         */
         case EV_TXSTART:
-            txActive = true;
+            txActive = true;           
             Serial.println(F("EV_TXSTART"));
+            if (LMIC.txrxFlags) showRxtxFlags();
             break;
         case EV_TXCANCELED:
             txActive = false;
