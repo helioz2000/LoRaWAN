@@ -2,7 +2,7 @@
   Rocketscream Mini Ultra Pro V1
   Board: Arduino Zero (Native USB Port)
 
-  Application: TTN ABP test
+  Application: TTN OTAA test
 
   RFM95W connections:
   DIO0 - D2 (fixed)
@@ -24,10 +24,11 @@
 
 #include <SPI.h>
 #include <RTCZero.h>
+#include <SerialFlash.h>    // provide access to serial flash chip
 
 // required for V2 or great to read device EUI from chip
 #include <Wire.h> 
-#include <SerialFlash.h>
+
 
 #define Serial SerialUSB    // Serial console is direct USB
 
@@ -67,20 +68,14 @@ void os_getDevKey (u1_t* buf) {
 }
 
 static uint8_t mydata[] = "VK3ERW";
-static osjob_t sendjob;
 static lmic_time_reference_t lmic_time_reference;
 
 static bool txActive = false;     // transmission is active
 static bool joined = false;       // indicate if we have successully joined
 static bool timeSyncDone = false; // network time sync
 
-// persistent storage
-struct storageParams {
-  uint8_t devEUI[8];  // device EUI storage
-  uint32_t dnctr;    // downlink frame counter
-  uint32_t upctr;    // uplink frame counter
-} nvmStorage;
-
+osjob_t sendjob;
+osjob_t initjob;
 
 uint32_t userUTCTime; // Seconds since the UTC epoch
 
@@ -96,20 +91,28 @@ const lmic_pinmap lmic_pins = {
 .dio = {2, 3, LMIC_UNUSED_PIN},
 };
 
+// initial job
+static void initfunc (osjob_t* j) {
+    // reset MAC state
+    LMIC_reset();
+    LMIC_setClockError(MAX_CLOCK_ERROR * 2 / 100);
+    // start joining
+    LMIC_startJoining();
+    // init done - onEvent() callback will be invoked...
+}
+
 // the setup function runs once when you press reset or power the board
 void setup() {
   int count;
 
   while (!Serial && millis() < 10000);
   Serial.begin(115200);       // fixed baudrate for USB, console can be set to anything
-  Serial.println(F("Starting - 1s delay"));
-  delay(1000);
-  /* For V2 boards
+  Serial.println(F("Starting - 10s delay"));
+  delay(10000);
   // Initialize serial flash
   SerialFlash.begin(4);
   // Put serial flash in sleep
   SerialFlash.sleep();
-  */
   
   pinMode(LED_BUILTIN, OUTPUT);
   
@@ -158,14 +161,8 @@ void setup() {
 
   // LMIC init
   os_init();
-  // Reset the MAC state. Session and pending data transfers will be discarded.
-  LMIC_reset();
-  delay(500);
-  LMIC_setClockError(MAX_CLOCK_ERROR * 2 / 100);
-
-  // Join request
-  LMIC_startJoining();  
-
+  // setup initial job
+  os_setCallback(&initjob, initfunc);
 }
 
 void printHex2(unsigned v) {
@@ -197,13 +194,20 @@ void showRxtxFlags(void) {
   Serial.println();
 }
 
+void printCounters(void) {
+  Serial.print(F("Up Ctr: "));
+  Serial.print(LMIC.seqnoUp);
+  Serial.print(F("  Dn Ctr: "));
+  Serial.print(LMIC.seqnoDn);
+}
+
 // This function will only work for Mini Ultra Pro V2 or greater
 void setDevEui(unsigned char* buf)
 {
   int i;
   // V1 - read EUI from definition
   // Format needs to be little endian (LSB...MSB)
-  for (i=0; i<EUI64_MAC_LENGTH-1; i++) {
+  for (i=0; i<EUI64_MAC_LENGTH; i++) {
     *buf-- = deviceEUI[i];
   }
   
@@ -288,9 +292,9 @@ void do_send(osjob_t* j){
         Serial.println(F("OP_TXRXPEND, not sending"));
     } else {
         // Schedule a network time request at the next possible time
-        //if (!timeSyncDone) {
-        //  LMIC_requestNetworkTime(user_request_network_time_callback, &userUTCTime);
-        //}
+        if (!timeSyncDone) {
+          LMIC_requestNetworkTime(user_request_network_time_callback, &userUTCTime);
+        }
         // Prepare upstream data transmission at the next possible time.
         lmic_tx_error = LMIC_setTxData2(1, mydata, sizeof(mydata)-1, 0);
         Serial.println(F("Packet queued"));
@@ -350,6 +354,8 @@ void onEvent (ev_t ev) {
                       printHex2(nwkKey[i]);
               }
               Serial.println();
+              printCounters();
+              Serial.println();
             }
             // Disable link check validation (automatically enabled
             // during join, but because slow data rates change max TX
@@ -374,9 +380,9 @@ void onEvent (ev_t ev) {
             break;
         case EV_TXCOMPLETE:
             txActive = false;
-            Serial.print(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
-            Serial.print(F(" LMIC.txCnt: "));
-            Serial.println(LMIC.txCnt);
+            Serial.print(F("EV_TXCOMPLETE (includes waiting for RX windows) "));
+            printCounters();
+            Serial.println();
             showRxtxFlags();
             if (LMIC.dataLen) {
               Serial.print(F("Received "));
@@ -396,6 +402,8 @@ void onEvent (ev_t ev) {
             // data received in ping slot
             Serial.println(F("EV_RXCOMPLETE"));
             if (LMIC.txrxFlags) showRxtxFlags();
+            printCounters();
+            Serial.println();
             break;
         case EV_LINK_DEAD:
             Serial.println(F("EV_LINK_DEAD"));
@@ -415,6 +423,8 @@ void onEvent (ev_t ev) {
             txActive = true;           
             Serial.println(F("EV_TXSTART"));
             if (LMIC.txrxFlags) showRxtxFlags();
+            printCounters();
+            Serial.println();
             break;
         case EV_TXCANCELED:
             txActive = false;
@@ -426,6 +436,8 @@ void onEvent (ev_t ev) {
         case EV_JOIN_TXCOMPLETE:
             txActive = false;
             Serial.println(F("EV_JOIN_TXCOMPLETE: no JoinAccept"));
+            printCounters();
+            Serial.println();
             break;
 
         default:
