@@ -7,6 +7,8 @@
  * This code will set a custom EUI in teh serial flash storage chip
  * 
  * SerialFlash library: https://github.com/PaulStoffregen/SerialFlash
+ * 
+ * Enter new device EUI below and press w to write it to SerialFlash
  */
 
 #define EUI64_MAC_LENGTH 8
@@ -21,7 +23,8 @@ static const uint8_t PROGMEM DEVEUI[EUI64_MAC_LENGTH] = { 0x00, 0x0D, 0x87, 0x31
 
 #define Serial SerialUSB    // Rocketscream serial console is direct USB
 
-#define FLASH_CS_PIN 4      // digital pin for flash chip CS pin
+#define RADIO_CS_PIN 5      // RFM95W chip select pin
+#define FLASH_CS_PIN 4      // digital pin for serial flash chip select pin
 
 typedef struct {
   uint8_t octet[EUI64_MAC_LENGTH];  // device EUI storage
@@ -32,7 +35,44 @@ EUIstruct devEUI;
 
 char consoleInputChar;
 bool EUIfileFound = false;
-const char EUIfileName[] = { "dev_eui.bin" };
+const char devEUIfileName[] = { "dev_eui.bin" };
+
+void setup() {
+  while (!Serial && millis() < 10000);
+  Serial.begin(115200);       // fixed baudrate for USB, console can be set to anything
+  Serial.println();
+  Serial.println();
+  Serial.println(F("Serial Flash - Starting"));
+  
+  pinMode(LED_BUILTIN, OUTPUT); 
+  pinMode(RADIO_CS_PIN, OUTPUT);
+  pinMode(FLASH_CS_PIN, OUTPUT);
+  // disable the radio chip
+  digitalWrite(RADIO_CS_PIN, HIGH);
+  // enable serial flash chip
+  digitalWrite(FLASH_CS_PIN, LOW);
+  
+  if (!SerialFlash.begin(FLASH_CS_PIN)) {
+    error("Unable to access SPI Flash chip");  
+  }
+
+  if (SerialFlash.exists(devEUIfileName)) {
+    EUIfileFound = true;
+  }
+
+  if (!EUIfileFound)
+    Serial.println(F("No EUI available"));
+  else
+    Serial.println(F("EUI file found"));
+  if (readEUIfile()) {
+    printAll();    
+  } else {
+    Serial.print(F("Proposed EUI: "));
+    printEUI(true);
+    Serial.println();
+  }
+  printUsage();
+}
 
 void printHex2(unsigned v) {
     v &= 0xff;
@@ -69,8 +109,25 @@ bool formatSerialFlash() {
   }
 }
 
+bool readEUIfile() {
+  char buffer[EUI64_MAC_LENGTH];
+  int i;
+  SerialFlashFile file;
+  file = SerialFlash.open(devEUIfileName);
+  if (!file) {  // true if the file exists
+    Serial.println(F("No EUI file found"));
+    return false;
+  }
+  file.read(buffer, EUI64_MAC_LENGTH);
+  file.close();
+  for (i=0; i<EUI64_MAC_LENGTH; i++) {
+    devEUI.octet[i] = buffer[i];
+  }
+  return true;
+}
+
 bool createEUIfile() {
-  if (SerialFlash.createErasable("dev_eui.bin", 256)) {
+  if (SerialFlash.createErasable(devEUIfileName, EUI64_MAC_LENGTH)) {
     Serial.println(F("EUI file succesfully created"));
     return true;
   } else {
@@ -79,40 +136,47 @@ bool createEUIfile() {
   }
 }
 
-void printEUI() {
+bool deleteEUIfile() {
+  if (SerialFlash.remove(devEUIfileName)) {
+    Serial.println(F("EUI file succesfully deleted"));
+    return true;
+  } else {
+    Serial.println(F("EUI file delete failed"));
+    return false;
+  }
+}
+
+void printEUI(bool proposed) {
   int i;
   for (i=0; i<EUI64_MAC_LENGTH-1; i++) {
-    printHex2(devEUI.octet[i]);
+    if (proposed) {
+      printHex2(DEVEUI[i]);
+    } else {
+      printHex2(devEUI.octet[i]);
+    }
     Serial.print(F("-"));
   }
   printHex2(devEUI.octet[EUI64_MAC_LENGTH-1]);
 }
 
-void loadNewEUI() {
-  int i;
-  for (i=0; i<EUI64_MAC_LENGTH; i++) {
-    devEUI.octet[i] = DEVEUI[i];
-  }
-}
-
 void printAll() {
   //devEUI = devEUIstore.read();
   Serial.print(F("Current (stored) EUI: "));
-  printEUI();
+  printEUI(false);
   Serial.println();
-  loadNewEUI();
   Serial.print(F("Proposed (new) EUI:   "));
-  printEUI();
+  printEUI(true);
   Serial.println();
 }
 
 void printUsage() {
   Serial.println(F("press c to create empty EUI file on Serial Flash"));
+  Serial.println(F("press d to delete EUI file from Serial Flash"));
   Serial.println(F("press f to format Serial Flash"));
   Serial.println(F("press i to print Serial Flash Information"));
   Serial.println(F("press l to list files on Serial Flash"));
   Serial.println(F("press r to read EUI"));
-  Serial.println(F("press w to write proposed EUI."));
+  Serial.println(F("press w to write proposed EUI to Serial Flash."));
 }
 
 void spaces(int num) {
@@ -244,49 +308,44 @@ void listSerialFlashFiles() {
     Serial.println(F("No files found"));
 }
 
-void setup() {
-  while (!Serial && millis() < 10000);
-  Serial.begin(115200);       // fixed baudrate for USB, console can be set to anything
-  Serial.println(F("Serial Flash - Starting"));
-  
-  pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(FLASH_CS_PIN, OUTPUT);
-
-  SPI.begin();
-  //SPI.setMOSI(19);  // Rocketscream has MOSI on pin 19
-  //SPI.setSCK(20);   // Rocketscream has SCK on pin 20
-  //SPI.setMISO(21);  // Rocketscream has MISO on pin 21
-  
-  if (SerialFlash.begin(FLASH_CS_PIN)) {
-    listSerialFlashFiles();
-  } else {
-    error("Unable to access SPI Flash chip");  
-  }
-
-  //printAll();
-  if (!EUIfileFound)
-    Serial.println(F("No EUI available"));
-  printUsage();
-}
 
 bool writeSerialFlash() {
   int i;
   bool writeRequired = false;
+  char buffer[EUI64_MAC_LENGTH];
+  SerialFlashFile file;
   
   // check if the stored EUI is the same as the proposed
-  //devEUI = devEUIstore.read();
   for (i=0; i<EUI64_MAC_LENGTH; i++) {
     if (devEUI.octet[i] != DEVEUI[i]) {
       writeRequired = true; }
   }
   if (writeRequired) {
-    loadNewEUI();
+    // create file if required
+    if (!SerialFlash.exists(devEUIfileName)) {
+      if (!SerialFlash.createErasable(devEUIfileName, EUI64_MAC_LENGTH)) {
+        Serial.println(F("Create EUI file failed"));
+        return false;
+      }
+    }
+    file = SerialFlash.open(devEUIfileName);
+    if (!file) {  // true if the file exists
+      Serial.println(F("EUI file open failed"));
+      return false;
+    }
+    // fill buffer with new EUI
+    for (i=0; i<EUI64_MAC_LENGTH; i++) {
+      buffer[i] = DEVEUI[i];
+    }
+    
     Serial.print(F("writing "));
-    printEUI();
-    Serial.println(F(" to Flash Storage"));
-    //devEUIstore.write(devEUI);
+    printEUI(true);
+    Serial.println(F(" to Serial Flash"));
+
+    file.write(buffer, EUI64_MAC_LENGTH);
+    file.close();
+
     Serial.println(F("write completed"));
-    printAll();
   } else {
     Serial.println(F("write bypassed - stored EUI is the same as proposed EUI. No need to waste Serial Flash write cycles."));
   }
@@ -307,6 +366,10 @@ void handleCommand(char cmd) {
     case 'C':
       createEUIfile();
       break;
+    case 'd':
+    case 'D':
+      deleteEUIfile();
+      break;
     case 'f':
     case 'F':
       formatSerialFlash();
@@ -321,8 +384,13 @@ void handleCommand(char cmd) {
       break;
     case 'r':
     case 'R':
-      //Serial.println(F("read command"));
-      printAll();
+      if (readEUIfile()) {
+        printAll();
+      } else {
+        Serial.print(F("Proposed EUI: "));
+        printEUI(true);
+        Serial.println();
+      }
       break;
     case 'w':
     case 'W':
