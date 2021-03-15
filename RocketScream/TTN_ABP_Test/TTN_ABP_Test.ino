@@ -23,8 +23,10 @@
 #include <hal/hal.h>
 
 #include <SPI.h>
-#include <Wire.h>     // needed to device EUI from chip on V2 or above
 #include <RTCZero.h>
+
+// required for V2 or great to read device EUI from chip
+#include <Wire.h> 
 #include <SerialFlash.h>
 
 #define Serial SerialUSB    // Serial console is direct USB
@@ -47,13 +49,13 @@ void os_getArtEui (u1_t* buf) {
 }
 
 // This should also be in little endian format, see above.
-// Note: Mini Ultra Pro V2 or greater provide Device EUI on board
-// the older V1 does not
-//u1_t DEVEUI[EUI64_MAC_LENGTH];
-static const u1_t PROGMEM DEVEUI[EUI64_MAC_LENGTH] = { 0x11, 0xAA, 0xF2, 0xF4, 0x31, 0x87, 0x0D, 0x00 };
+u1_t DEVEUI[EUI64_MAC_LENGTH];
 void os_getDevEui (u1_t* buf) {
   memcpy(buf, DEVEUI, EUI64_MAC_LENGTH);
 }
+
+// for V1 boards we need to define the device EUI here (copy from TTN application definition)
+static const u1_t PROGMEM deviceEUI[EUI64_MAC_LENGTH] = { 0x00, 0x0D, 0x87, 0x31, 0xF4, 0xF2, 0xAA, 0x11 };
 
 // This key should be in big endian format (or, since it is not really a
 // number but a block of memory, endianness does not really apply). In
@@ -71,6 +73,14 @@ static lmic_time_reference_t lmic_time_reference;
 static bool txActive = false;     // transmission is active
 static bool joined = false;       // indicate if we have successully joined
 static bool timeSyncDone = false; // network time sync
+
+// persistent storage
+struct storageParams {
+  uint8_t devEUI[8];  // device EUI storage
+  uint32_t dnctr;    // downlink frame counter
+  uint32_t upctr;    // uplink frame counter
+} nvmStorage;
+
 
 uint32_t userUTCTime; // Seconds since the UTC epoch
 
@@ -94,11 +104,13 @@ void setup() {
   Serial.begin(115200);       // fixed baudrate for USB, console can be set to anything
   Serial.println(F("Starting - 1s delay"));
   delay(1000);
+  /* For V2 boards
   // Initialize serial flash
   SerialFlash.begin(4);
   // Put serial flash in sleep
   SerialFlash.sleep();
-
+  */
+  
   pinMode(LED_BUILTIN, OUTPUT);
   
   // ***** Put unused pins into known state *****
@@ -134,14 +146,12 @@ void setup() {
   rtc.setEpoch(0);
   
   // Enable for Rocketscream Mini Ultra Pro V2 or greater
-  //setDevEui(&DEVEUI[EUI64_MAC_LENGTH - 1]);
+  setDevEui(&DEVEUI[EUI64_MAC_LENGTH - 1]);
 
   // Display device EUI
   Serial.print("Device EUI: ");
-  for (count = EUI64_MAC_LENGTH; count > 0; count--) {
-    //Serial.print("0x");
-    if (DEVEUI[count - 1] <= 0x0F) Serial.print("0");
-    Serial.print(DEVEUI[count - 1], HEX);
+  for (count = EUI64_MAC_LENGTH-1; count >= 0; count--) {
+    printHex2(DEVEUI[count]);
     Serial.print(" ");
   }
   Serial.println();
@@ -190,6 +200,14 @@ void showRxtxFlags(void) {
 // This function will only work for Mini Ultra Pro V2 or greater
 void setDevEui(unsigned char* buf)
 {
+  int i;
+  // V1 - read EUI from definition
+  // Format needs to be little endian (LSB...MSB)
+  for (i=0; i<EUI64_MAC_LENGTH-1; i++) {
+    *buf-- = deviceEUI[i];
+  }
+  
+  /* for V2 or greater
   Wire.begin();
   Wire.beginTransmission(EUI64_CHIP_ADDRESS);
   Wire.write(EUI64_MAC_ADDRESS);
@@ -201,6 +219,7 @@ void setDevEui(unsigned char* buf)
   {
     *buf-- = Wire.read();
   }
+  */
 }
 
 void user_request_network_time_callback(void *pVoidUserUTCTime, int flagSuccess) {
