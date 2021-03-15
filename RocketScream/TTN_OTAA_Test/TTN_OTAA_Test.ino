@@ -29,8 +29,12 @@
 // required for V2 or great to read device EUI from chip
 #include <Wire.h> 
 
-
 #define Serial SerialUSB    // Serial console is direct USB
+
+#define RADIO_CS_PIN 5      // RFM95W chip select pin
+#define FLASH_CS_PIN 4      // digital pin for serial flash chip select pin
+
+char consoleInputChar;
 
 // Only relevant for Mini Ultra Pro V2 or greater
 #define EUI64_CHIP_ADDRESS 0x50
@@ -68,7 +72,7 @@ void os_getDevKey (u1_t* buf) {
 }
 
 static uint8_t mydata[] = "VK3ERW";
-static lmic_time_reference_t lmic_time_reference;
+//static lmic_time_reference_t lmic_time_reference;
 
 static bool txActive = false;     // transmission is active
 static bool joined = false;       // indicate if we have successully joined
@@ -91,26 +95,17 @@ const lmic_pinmap lmic_pins = {
 .dio = {2, 3, LMIC_UNUSED_PIN},
 };
 
-// initial job
-static void initfunc (osjob_t* j) {
-    // reset MAC state
-    LMIC_reset();
-    LMIC_setClockError(MAX_CLOCK_ERROR * 2 / 100);
-    // start joining
-    LMIC_startJoining();
-    // init done - onEvent() callback will be invoked...
-}
-
-// the setup function runs once when you press reset or power the board
 void setup() {
   int count;
 
   while (!Serial && millis() < 10000);
   Serial.begin(115200);       // fixed baudrate for USB, console can be set to anything
+  Serial.println();
+  Serial.println();
   Serial.println(F("Starting - 10s delay"));
   delay(10000);
   // Initialize serial flash
-  SerialFlash.begin(4);
+  SerialFlash.begin(FLASH_CS_PIN);
   // Put serial flash in sleep
   SerialFlash.sleep();
   
@@ -165,11 +160,27 @@ void setup() {
   os_setCallback(&initjob, initfunc);
 }
 
+// initial job
+static void initfunc (osjob_t* j) {
+    // reset MAC state
+    LMIC_reset();
+    LMIC_setClockError(MAX_CLOCK_ERROR * 2 / 100);
+    // start joining
+    LMIC_startJoining();
+    // init done - onEvent() callback will be invoked...
+}
+
 void printHex2(unsigned v) {
     v &= 0xff;
     if (v < 16)
         Serial.print('0');
     Serial.print(v, HEX);
+}
+
+void printUsage() {
+  Serial.println(F("Commands"));
+  Serial.println(F("s - send packet"));
+  Serial.println(F("t - schedule network time request time"));
 }
 
 void showRxtxFlags(void) {
@@ -202,8 +213,7 @@ void printCounters(void) {
 }
 
 // This function will only work for Mini Ultra Pro V2 or greater
-void setDevEui(unsigned char* buf)
-{
+void setDevEui(unsigned char* buf) {
   int i;
   // V1 - read EUI from definition
   // Format needs to be little endian (LSB...MSB)
@@ -219,8 +229,7 @@ void setDevEui(unsigned char* buf)
   Wire.requestFrom(EUI64_CHIP_ADDRESS, EUI64_MAC_LENGTH);
 
   // Format needs to be little endian (LSB...MSB)
-  while (Wire.available())
-  {
+  while (Wire.available()) {
     *buf-- = Wire.read();
   }
   */
@@ -284,7 +293,6 @@ void user_request_network_time_callback(void *pVoidUserUTCTime, int flagSuccess)
     */
 }
 
-
 void do_send(osjob_t* j){
     lmic_tx_error_t lmic_tx_error;
     // Check if there is not a current TX/RX job running
@@ -292,9 +300,7 @@ void do_send(osjob_t* j){
         Serial.println(F("OP_TXRXPEND, not sending"));
     } else {
         // Schedule a network time request at the next possible time
-        if (!timeSyncDone) {
-          LMIC_requestNetworkTime(user_request_network_time_callback, &userUTCTime);
-        }
+        // LMIC_requestNetworkTime(user_request_network_time_callback, &userUTCTime);
         // Prepare upstream data transmission at the next possible time.
         lmic_tx_error = LMIC_setTxData2(1, mydata, sizeof(mydata)-1, 0);
         Serial.println(F("Packet queued"));
@@ -356,6 +362,7 @@ void onEvent (ev_t ev) {
               Serial.println();
               printCounters();
               Serial.println();
+              printUsage();
             }
             // Disable link check validation (automatically enabled
             // during join, but because slow data rates change max TX
@@ -390,7 +397,7 @@ void onEvent (ev_t ev) {
               Serial.println(F(" bytes of payload"));
             }
             // Schedule next transmission
-            os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
+            //os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
             break;
         case EV_LOST_TSYNC:
             Serial.println(F("EV_LOST_TSYNC"));
@@ -447,13 +454,43 @@ void onEvent (ev_t ev) {
     }
 }
 
+bool recvOneChar() {
+  if (Serial.available() > 0) {
+    consoleInputChar = Serial.read();
+    return true;
+  }
+  return false;
+}
+
+void handleCommand(char cmd) {
+  if (!joined) {
+    Serial.print(F("Wait until JOIN is completed"));
+    return;
+  }
+  switch (cmd) {
+    case 's':
+    case 'S':
+      do_send(&sendjob);
+      break;
+    case 't':
+    case 'T':
+      // Schedule a network time request at the next possible time
+      LMIC_requestNetworkTime(user_request_network_time_callback, &userUTCTime);
+      break;
+    default:
+      Serial.print(F("Invalid command"));
+      break;
+  }
+}
+
 void loop() {
   int result;
   os_runloop_once();
-  /*
-  // Start job (sending automatically starts OTAA too)
-  do_send(&sendjob);
-  */
+
+  if (recvOneChar()) {
+    if (consoleInputChar > ' ')
+      handleCommand(consoleInputChar);
+  }
   // LED On while transmitting
   if (txActive) {
     digitalWrite(PIN_LED_13, HIGH);
@@ -461,26 +498,4 @@ void loop() {
     digitalWrite(PIN_LED_13, LOW);
   }
   
-  if (joined && !timeSyncDone) {
-    /*
-    result = LMIC_getNetworkTimeReference(&lmic_time_reference);
-    if (result == 0) {
-      Serial.println("Invalid time");
-    } else {
-      Serial.print(F("Time: "));
-      Serial.print(lmic_time_reference.tLocal);
-      Serial.print(" ");
-      Serial.println(lmic_time_reference.tNetwork);
-    }
-    */
-    do_send(&sendjob);
-    timeSyncDone = true;
-  }
-/*
-  digitalWrite(PIN_LED_13, HIGH);   // turn the LED on (HIGH is the voltage level)
-  //delay(1000);                       // wait for a second
-  digitalWrite(PIN_LED_13, LOW);    // turn the LED off by making the voltage LOW
-  //delay(1000);                       // wait for a second
-*/
-
 }
