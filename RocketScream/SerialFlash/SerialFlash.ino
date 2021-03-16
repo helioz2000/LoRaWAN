@@ -14,8 +14,8 @@
 #define EUI64_MAC_LENGTH 8
 
 // ==========================================================================================================
-// put your new EUI in the line below
-static const uint8_t PROGMEM DEVEUI[EUI64_MAC_LENGTH] = { 0x00, 0x0D, 0x87, 0x31, 0xF4, 0xF2, 0xAA, 0x11 }; // <<---------
+// reaplace with new device EUI
+static const uint8_t PROGMEM DEVEUI[EUI64_MAC_LENGTH] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07 }; // <<---------
 // ==========================================================================================================
 
 #include <SerialFlash.h>
@@ -55,7 +55,7 @@ void setup() {
   if (!SerialFlash.begin(FLASH_CS_PIN)) {
     error("Unable to access SPI Flash chip");  
   }
-
+  SerialFlash.wakeup();   // coudl be asleep after main processor reset
   if (SerialFlash.exists(devEUIfileName)) {
     EUIfileFound = true;
   }

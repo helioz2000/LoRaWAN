@@ -14,9 +14,18 @@
   _CS_ - D4
 
   Note: Mini Ultra Pro V1 does not come with a globally unique Device EUI.
-        The EUI is located in a chip and needs to be read out via the I2C
-        bus. For V1 devices use an EUI which can be assigned by TTN
-        durign the device registration process.
+        The EUI is located in a Microchip chip and needs to be read out via the I2C
+        bus. 
+        
+  Sourcing a device EUI: 
+        1) use an EUI which can be assigned by TTN durign the device registration process.
+        2) purchase and EUI 64 chip and use the EUI from the chip; destroy ship to avoide dupicate EUI's
+
+  Storing the EUI:
+        This code provides for 2 options to store the device EUI:
+        1) stored in a file on the SerialFlash chip (part of rocketscream board)
+        2) hardcoded into the source code (this file)
+        See code below for more details
 */
 
 #include <lmic.h>
@@ -59,8 +68,17 @@ void os_getDevEui (u1_t* buf) {
   memcpy(buf, DEVEUI, EUI64_MAC_LENGTH);
 }
 
-// for V1 boards we need to define the device EUI here (copy from TTN application definition)
-static const u1_t PROGMEM deviceEUI[EUI64_MAC_LENGTH] = { 0x00, 0x0D, 0x87, 0x31, 0xF4, 0xF2, 0xAA, 0x11 };
+/* Device EUI for Rocketscream V1 board (no EUI chip)
+ * Two options to provide the device EUI:
+ * 1) stored in a file on the SerialFlash chip
+ * 2) hardcoded below
+ * If option 1 is present option 2 will be ignored
+ */
+ 
+// Option 1) device EUI stored in a file on the SerialFlash chip
+const char devEUIfileName[] = { "dev_eui.bin" };
+// Option 2) device EUI hardcoded here (copy from TTN application definition)
+static const u1_t PROGMEM deviceEUI[EUI64_MAC_LENGTH] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
 // This key should be in big endian format (or, since it is not really a
 // number but a block of memory, endianness does not really apply). In
@@ -72,11 +90,11 @@ void os_getDevKey (u1_t* buf) {
 }
 
 static uint8_t mydata[] = "VK3ERW";
-//static lmic_time_reference_t lmic_time_reference;
+static lmic_time_reference_t lmic_time_reference;
 
 static bool txActive = false;     // transmission is active
 static bool joined = false;       // indicate if we have successully joined
-static bool timeSyncDone = false; // network time sync
+static bool nwTimeRequest = false; // network time request scheduled
 
 osjob_t sendjob;
 osjob_t initjob;
@@ -96,20 +114,35 @@ const lmic_pinmap lmic_pins = {
 };
 
 void setup() {
-  int count;
-
   while (!Serial && millis() < 10000);
   Serial.begin(115200);       // fixed baudrate for USB, console can be set to anything
   Serial.println();
   Serial.println();
-  Serial.println(F("Starting - 10s delay"));
-  delay(10000);
-  // Initialize serial flash
-  SerialFlash.begin(FLASH_CS_PIN);
-  // Put serial flash in sleep
-  SerialFlash.sleep();
-  
+  Serial.println(F("Starting"));
   pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(RADIO_CS_PIN, OUTPUT);
+  pinMode(FLASH_CS_PIN, OUTPUT);
+  // disable the radio chip
+  digitalWrite(RADIO_CS_PIN, HIGH);
+  // enable serial flash chip
+  digitalWrite(FLASH_CS_PIN, LOW);
+  delay(200); // time for CS to take place
+  // Initialize serial flash
+  if (!SerialFlash.begin(FLASH_CS_PIN)) {
+    Serial.println(F("Unable to access SPI Flash chip"));  
+  }
+  SerialFlash.wakeup();     // may still be asleep after reset of main chip
+  setDevEui(&DEVEUI[EUI64_MAC_LENGTH - 1]);  
+  // Put SerialFlash in sleep - no longer needed
+  SerialFlash.sleep();
+
+  // Display device EUI
+  Serial.print("Device EUI: ");
+  printDevEUI();
+  Serial.println();
+
+  Serial.println(F("10s delay"));
+  delay(10000);
   
   // ***** Put unused pins into known state *****
   pinMode(0, INPUT_PULLUP);   // Serial 1
@@ -143,16 +176,6 @@ void setup() {
   // Use RTC as a second timer instead of calendar
   rtc.setEpoch(0);
   
-  // Enable for Rocketscream Mini Ultra Pro V2 or greater
-  setDevEui(&DEVEUI[EUI64_MAC_LENGTH - 1]);
-
-  // Display device EUI
-  Serial.print("Device EUI: ");
-  for (count = EUI64_MAC_LENGTH-1; count >= 0; count--) {
-    printHex2(DEVEUI[count]);
-    Serial.print(" ");
-  }
-  Serial.println();
 
   // LMIC init
   os_init();
@@ -167,7 +190,71 @@ static void initfunc (osjob_t* j) {
     LMIC_setClockError(MAX_CLOCK_ERROR * 2 / 100);
     // start joining
     LMIC_startJoining();
+    LMIC_registerRxMessageCb(rxmessage_callback, NULL);
     // init done - onEvent() callback will be invoked...
+}
+
+void printDevEUI(void) {
+  int count;
+  for (count = EUI64_MAC_LENGTH-1; count >= 0; count--) {
+    printHex2(DEVEUI[count]);
+    Serial.print(" ");
+  }
+}
+
+/*
+ * read device EUI from SerialFlash
+ * returns true if EUI was successfuly retrieved
+ */
+bool readSerialFlash(unsigned char* buf) {
+  char buffer[EUI64_MAC_LENGTH];
+  int i;
+  SerialFlashFile file;
+  // wait for SerialFlash to be ready
+  while (SerialFlash.ready() == false);
+  file = SerialFlash.open(devEUIfileName);
+  if (!file) {  // true if the file exists
+    Serial.println(F("No EUI file found on SerialFlash"));
+    return false;
+  }
+  Serial.println(F("EUI file found on SerialFlash"));
+  file.read(buffer, EUI64_MAC_LENGTH);
+  file.close();
+  // Format needs to be little endian (LSB...MSB)
+  for (i=0; i<EUI64_MAC_LENGTH; i++) {
+    *buf-- = buffer[i];
+  }
+  return true;
+}
+
+/*
+ * read device EUI and reverse byte order for little endian format
+ * first try to read from SerialFlash, if not found use hardcoded EUI
+ */
+void setDevEui(unsigned char* buf) {
+  int i;
+
+  if (!readSerialFlash(buf)) {
+  // read EUI from hardcoded definition
+  // Format needs to be little endian (LSB...MSB)
+    for (i=0; i<EUI64_MAC_LENGTH; i++) {
+      *buf-- = deviceEUI[i];
+    }
+    Serial.println(F("use hard coded device EUI"));
+  }
+  
+  /* for V2 or greater
+  Wire.begin();
+  Wire.beginTransmission(EUI64_CHIP_ADDRESS);
+  Wire.write(EUI64_MAC_ADDRESS);
+  Wire.endTransmission();
+  Wire.requestFrom(EUI64_CHIP_ADDRESS, EUI64_MAC_LENGTH);
+
+  // Format needs to be little endian (LSB...MSB)
+  while (Wire.available()) {
+    *buf-- = Wire.read();
+  }
+  */
 }
 
 void printHex2(unsigned v) {
@@ -212,72 +299,53 @@ void printCounters(void) {
   Serial.print(LMIC.seqnoDn);
 }
 
-// This function will only work for Mini Ultra Pro V2 or greater
-void setDevEui(unsigned char* buf) {
-  int i;
-  // V1 - read EUI from definition
-  // Format needs to be little endian (LSB...MSB)
-  for (i=0; i<EUI64_MAC_LENGTH; i++) {
-    *buf-- = deviceEUI[i];
+static void user_request_network_time_callback(void *pVoidUserUTCTime, int flagSuccess) {  
+  // Explicit conversion from void* to uint32_t* to avoid compiler errors
+  uint32_t *pUserUTCTime = (uint32_t *) pVoidUserUTCTime;
+
+  // A struct that will be populated by LMIC_getNetworkTimeReference.
+  // It contains the following fields:
+  //  - tLocal: the value returned by os_GetTime() when the time
+  //            request was sent to the gateway, and
+  //  - tNetwork: the seconds between the GPS epoch and the time
+  //              the gateway received the time request
+  lmic_time_reference_t lmicTimeReference;
+
+  Serial.println("USER CALLBACK network time");
+
+  if (flagSuccess != 1) {
+    Serial.print("USER CALLBACK: Not a success: ");
+    Serial.print(flagSuccess);
+    Serial.println();
+    return;
   }
-  
-  /* for V2 or greater
-  Wire.begin();
-  Wire.beginTransmission(EUI64_CHIP_ADDRESS);
-  Wire.write(EUI64_MAC_ADDRESS);
-  Wire.endTransmission();
-  Wire.requestFrom(EUI64_CHIP_ADDRESS, EUI64_MAC_LENGTH);
 
-  // Format needs to be little endian (LSB...MSB)
-  while (Wire.available()) {
-    *buf-- = Wire.read();
+  // Populate "lmic_time_reference"
+  flagSuccess = LMIC_getNetworkTimeReference(&lmicTimeReference);
+  if (flagSuccess != 1) {
+    Serial.println(F("USER CALLBACK: LMIC_getNetworkTimeReference didn't succeed"));
+    return;
   }
-  */
-}
 
-void user_request_network_time_callback(void *pVoidUserUTCTime, int flagSuccess) {
-    // Explicit conversion from void* to uint32_t* to avoid compiler errors
-    uint32_t *pUserUTCTime = (uint32_t *) pVoidUserUTCTime;
-
-    // A struct that will be populated by LMIC_getNetworkTimeReference.
-    // It contains the following fields:
-    //  - tLocal: the value returned by os_GetTime() when the time
-    //            request was sent to the gateway, and
-    //  - tNetwork: the seconds between the GPS epoch and the time
-    //              the gateway received the time request
-    lmic_time_reference_t lmicTimeReference;
-
-    if (flagSuccess == 0) {
-        Serial.println(F("USER CALLBACK: Not a success"));
-        return;
-    }
-
-    // Populate "lmic_time_reference"
-    flagSuccess = LMIC_getNetworkTimeReference(&lmicTimeReference);
-    if (flagSuccess != 1) {
-        Serial.println(F("USER CALLBACK: LMIC_getNetworkTimeReference didn't succeed"));
-        return;
-    }
-
-    Serial.println(F("USER CALLBACK: LMIC_getNetworkTimeReference success!"));
+  Serial.println(F("USER CALLBACK: LMIC_getNetworkTimeReference success!"));
     
-    // Update userUTCTime, considering the difference between the GPS and UTC
-    // epoch, and the leap seconds
-    *pUserUTCTime = lmicTimeReference.tNetwork + 315964800;
+  // Update userUTCTime, considering the difference between the GPS and UTC
+  // epoch, and the leap seconds
+  *pUserUTCTime = lmicTimeReference.tNetwork + 315964800;
 
-    // Add the delay between the instant the time was transmitted and
-    // the current time
+  // Add the delay between the instant the time was transmitted and
+  // the current time
 
-    // Current time, in ticks
-    ostime_t ticksNow = os_getTime();
-    // Time when the request was sent, in ticks
-    ostime_t ticksRequestSent = lmicTimeReference.tLocal;
-    uint32_t requestDelaySec = osticks2ms(ticksNow - ticksRequestSent) / 1000;
-    *pUserUTCTime += requestDelaySec;
+  // Current time, in ticks
+  ostime_t ticksNow = os_getTime();
+  // Time when the request was sent, in ticks
+  ostime_t ticksRequestSent = lmicTimeReference.tLocal;
+  uint32_t requestDelaySec = osticks2ms(ticksNow - ticksRequestSent) / 1000;
+  *pUserUTCTime += requestDelaySec;
 
-    // Update the system time with the time read from the network
-    /*
-    setTime(*pUserUTCTime);
+  // Update the system time with the time read from the network
+  /*
+  setTime(*pUserUTCTime);
 
     Serial.print(F("The current UTC time is: "));
     Serial.print(hour());
@@ -293,6 +361,13 @@ void user_request_network_time_callback(void *pVoidUserUTCTime, int flagSuccess)
     */
 }
 
+static void rxmessage_callback(void *pUserData, u1_t port, const u1_t *pMessage, size_t nMessage) {
+  Serial.print(F("rx message callback "));
+  Serial.print(nMessage);
+  Serial.print(F(" bytes, port:"));
+  Serial.println(port);
+}
+
 void do_send(osjob_t* j){
     lmic_tx_error_t lmic_tx_error;
     // Check if there is not a current TX/RX job running
@@ -300,7 +375,10 @@ void do_send(osjob_t* j){
         Serial.println(F("OP_TXRXPEND, not sending"));
     } else {
         // Schedule a network time request at the next possible time
-        // LMIC_requestNetworkTime(user_request_network_time_callback, &userUTCTime);
+        if (nwTimeRequest) {
+          LMIC_requestNetworkTime(user_request_network_time_callback, &userUTCTime);
+          nwTimeRequest = false;
+        }
         // Prepare upstream data transmission at the next possible time.
         lmic_tx_error = LMIC_setTxData2(1, mydata, sizeof(mydata)-1, 0);
         Serial.println(F("Packet queued"));
@@ -475,7 +553,8 @@ void handleCommand(char cmd) {
     case 't':
     case 'T':
       // Schedule a network time request at the next possible time
-      LMIC_requestNetworkTime(user_request_network_time_callback, &userUTCTime);
+      nwTimeRequest = true;
+      Serial.print(F("Network time request will be made with next packet transmission"));
       break;
     default:
       Serial.print(F("Invalid command"));
